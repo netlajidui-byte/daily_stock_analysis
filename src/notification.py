@@ -792,6 +792,8 @@ class NotificationService(
         """
         if report_date is None:
             report_date = datetime.now().strftime('%Y-%m-%d')
+
+        return self._generate_daily_a_share_observation_report(results, report_date)
         report_language = self._get_report_language(results)
         labels = get_report_labels(report_language)
 
@@ -1016,6 +1018,225 @@ class NotificationService(
             result.sentiment_score,
             self._get_report_language(result),
         )
+
+    @staticmethod
+    def _compact_text(value: Any, fallback: str = "-") -> str:
+        if value is None:
+            return fallback
+        if isinstance(value, (list, tuple)):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return "；".join(items) if items else fallback
+        text = str(value).strip()
+        return " ".join(text.split()) if text else fallback
+
+    @staticmethod
+    def _limit_text(value: Any, max_chars: int = 220, fallback: str = "-") -> str:
+        text = NotificationService._compact_text(value, fallback="")
+        if not text:
+            return fallback
+        return text if len(text) <= max_chars else text[: max_chars - 1].rstrip() + "…"
+
+    def _risk_level_for_daily_report(self, result: AnalysisResult) -> str:
+        score = getattr(result, "sentiment_score", 50) or 50
+        decision_type = getattr(result, "decision_type", "") or ""
+        risk_text = self._compact_text(getattr(result, "risk_warning", ""), fallback="")
+        dashboard = result.dashboard or {}
+        risk_alerts = ((dashboard.get("intelligence") or {}).get("risk_alerts") or [])
+        if decision_type == "sell" or score < 40 or len(risk_alerts) >= 2:
+            return "高"
+        if score < 60 or risk_text or risk_alerts:
+            return "中"
+        return "低"
+
+    def _tomorrow_strategy_for_daily_report(self, result: AnalysisResult) -> str:
+        dashboard = result.dashboard or {}
+        core = dashboard.get("core_conclusion") or {}
+        battle = dashboard.get("battle_plan") or {}
+        position_advice = core.get("position_advice") or {}
+        strategy = (
+            position_advice.get("has_position")
+            or position_advice.get("no_position")
+            or (battle.get("position_strategy") or {}).get("entry_plan")
+            or getattr(result, "short_term_outlook", "")
+            or getattr(result, "operation_advice", "")
+        )
+        return self._limit_text(strategy, 90)
+
+    def _technical_line_for_daily_report(self, result: AnalysisResult) -> str:
+        dashboard = result.dashboard or {}
+        data_perspective = dashboard.get("data_perspective") or {}
+        trend = data_perspective.get("trend_status") or {}
+        price = data_perspective.get("price_position") or {}
+        volume = data_perspective.get("volume_analysis") or {}
+        parts = []
+        if trend:
+            parts.append(
+                f"趋势{self._compact_text(trend.get('ma_alignment'))}，强度{self._compact_text(trend.get('trend_score'))}/100"
+            )
+        if price:
+            support = self._compact_text(price.get("support_level"))
+            resistance = self._compact_text(price.get("resistance_level"))
+            parts.append(f"支撑{support}，压力{resistance}")
+        if volume:
+            parts.append(
+                f"量能{self._compact_text(volume.get('volume_status'))}，量比{self._compact_text(volume.get('volume_ratio'))}"
+            )
+        fallback = getattr(result, "technical_analysis", "") or getattr(result, "ma_analysis", "") or getattr(result, "trend_analysis", "")
+        return self._limit_text("；".join(parts) or fallback, 260)
+
+    def _news_line_for_daily_report(self, result: AnalysisResult) -> str:
+        dashboard = result.dashboard or {}
+        intelligence = dashboard.get("intelligence") or {}
+        parts = [
+            intelligence.get("latest_news"),
+            intelligence.get("sentiment_summary"),
+            intelligence.get("earnings_outlook"),
+        ]
+        catalysts = intelligence.get("positive_catalysts") or []
+        if catalysts:
+            parts.append("利好催化：" + self._compact_text(catalysts[:2], fallback=""))
+        fallback = getattr(result, "news_summary", "") or getattr(result, "market_sentiment", "")
+        text = "；".join(self._compact_text(part, fallback="") for part in parts if self._compact_text(part, fallback=""))
+        return self._limit_text(text or fallback, 260)
+
+    def _funds_line_for_daily_report(self, result: AnalysisResult) -> str:
+        dashboard = result.dashboard or {}
+        data_perspective = dashboard.get("data_perspective") or {}
+        volume = data_perspective.get("volume_analysis") or {}
+        chip = data_perspective.get("chip_structure") or {}
+        parts = []
+        if volume:
+            parts.append(
+                f"成交{self._compact_text(volume.get('volume_status'))}，换手{self._compact_text(volume.get('turnover_rate'))}%"
+            )
+            if volume.get("volume_meaning"):
+                parts.append(self._compact_text(volume.get("volume_meaning")))
+        if chip and not is_chip_structure_unavailable(chip):
+            parts.append(
+                f"筹码健康度{self._compact_text(chip.get('chip_health'))}，集中度{self._compact_text(chip.get('concentration'))}"
+            )
+        fallback = getattr(result, "volume_analysis", "")
+        return self._limit_text("；".join(parts) or fallback, 240)
+
+    def _operation_plan_for_daily_report(self, result: AnalysisResult) -> str:
+        dashboard = result.dashboard or {}
+        battle = dashboard.get("battle_plan") or {}
+        sniper = battle.get("sniper_points") or {}
+        position = battle.get("position_strategy") or {}
+        checklist = battle.get("action_checklist") or []
+        parts = []
+        if sniper:
+            parts.append(
+                "买点"
+                f"{self._clean_sniper_value(sniper.get('ideal_buy', '-'))}，"
+                f"止损{self._clean_sniper_value(sniper.get('stop_loss', '-'))}，"
+                f"止盈{self._clean_sniper_value(sniper.get('take_profit', '-'))}"
+            )
+        if position.get("entry_plan"):
+            parts.append(self._compact_text(position.get("entry_plan")))
+        if checklist:
+            parts.append("执行条件：" + self._compact_text(checklist[:3], fallback=""))
+        return self._limit_text("；".join(parts) or self._tomorrow_strategy_for_daily_report(result), 280)
+
+    def _daily_report_stock_block(self, result: AnalysisResult) -> List[str]:
+        dashboard = result.dashboard or {}
+        core = dashboard.get("core_conclusion") or {}
+        intelligence = dashboard.get("intelligence") or {}
+        stock_name = self._get_display_name(result, "zh")
+        conclusion = core.get("one_sentence") or getattr(result, "analysis_summary", "")
+        risks = intelligence.get("risk_alerts") or getattr(result, "risk_warning", "")
+        lines = [
+            f"### {stock_name}（{result.code}）",
+            f"- 今日结论：{self._limit_text(conclusion, 220)}",
+            f"- 技术面：{self._technical_line_for_daily_report(result)}",
+            f"- 消息面：{self._news_line_for_daily_report(result)}",
+            f"- 资金面：{self._funds_line_for_daily_report(result)}",
+            f"- 明日操作计划：{self._operation_plan_for_daily_report(result)}",
+            f"- 风险提醒：{self._limit_text(risks, 220)}",
+            "",
+        ]
+        return lines
+
+    def _generate_daily_a_share_observation_report(
+        self,
+        results: List[AnalysisResult],
+        report_date: str,
+    ) -> str:
+        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
+        buy_count = sum(1 for r in results if getattr(r, "decision_type", "") == "buy")
+        sell_count = sum(1 for r in results if getattr(r, "decision_type", "") == "sell")
+        hold_count = len(results) - buy_count - sell_count
+        market_status = self._public_market_status_line(results, "zh") or "以自选股结构为观察口径，等待收盘数据和明日开盘确认。"
+        avg_score = round(sum((getattr(r, "sentiment_score", 0) or 0) for r in results) / len(results), 1) if results else 0
+        hot_topics = [
+            self._compact_text(getattr(r, "hot_topics", ""), fallback="")
+            for r in sorted_results
+            if self._compact_text(getattr(r, "hot_topics", ""), fallback="")
+        ]
+        hot_direction = hot_topics[0] if hot_topics else "关注评分靠前个股所属方向，优先看量价配合和资金承接。"
+        risk_names = [
+            f"{self._get_display_name(r, 'zh')}({r.code})"
+            for r in sorted_results
+            if self._risk_level_for_daily_report(r) == "高"
+        ]
+        tomorrow_risk = "高风险个股：" + "、".join(risk_names[:5]) if risk_names else "不追高，重点防范冲高回落和量能不足。"
+
+        lines = [
+            "【每日A股观察】",
+            f"日期：{report_date}",
+            "",
+            "一、今日市场结论",
+            f"- 大盘状态：{market_status}",
+            f"- 市场情绪：平均评分 {avg_score}，买入 {buy_count} / 观察 {hold_count} / 卖出 {sell_count}。",
+            f"- 热点方向：{self._limit_text(hot_direction, 160)}",
+            f"- 明日风险：{self._limit_text(tomorrow_risk, 160)}",
+            "",
+            "二、自选股评级总表",
+            "",
+            "| 股票名称 | 代码 | 结论 | 趋势 | 风险等级 | 明日策略 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for result in sorted_results:
+            name = self._get_display_name(result, "zh")
+            conclusion = localize_operation_advice(result.operation_advice, "zh")
+            trend = localize_trend_prediction(result.trend_prediction, "zh")
+            risk = self._risk_level_for_daily_report(result)
+            strategy = self._tomorrow_strategy_for_daily_report(result)
+            lines.append(f"| {name} | {result.code} | {conclusion} | {trend} | {risk} | {strategy} |")
+
+        lines.extend(["", "三、重点个股分析", ""])
+        if self._report_summary_only:
+            lines.append("- 当前配置为只推送摘要，个股详细分析已省略。")
+            lines.append("")
+        else:
+            for result in sorted_results:
+                lines.extend(self._daily_report_stock_block(result))
+
+        lines.extend(["四、明日最值得关注的 5 只股票", ""])
+        for idx, result in enumerate(sorted_results[:5], start=1):
+            name = self._get_display_name(result, "zh")
+            reason = (
+                (result.dashboard or {}).get("core_conclusion", {}).get("one_sentence")
+                or getattr(result, "buy_reason", "")
+                or getattr(result, "analysis_summary", "")
+                or self._tomorrow_strategy_for_daily_report(result)
+            )
+            lines.append(f"{idx}. {name}（{result.code}）：{self._limit_text(reason, 180)}")
+
+        lines.extend([
+            "",
+            "五、纪律提醒",
+            "- 不追高",
+            "- 不满仓",
+            "- 不临盘随意加仓",
+            "- 只按计划操作",
+            "",
+            f"*生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
+        ])
+        models = self._collect_models_used(results)
+        if models:
+            lines.append(f"*分析模型：{', '.join(models)}*")
+        return "\n".join(lines)
     
     def generate_dashboard_report(
         self,
@@ -1043,6 +1264,12 @@ class NotificationService(
         ma_label = "Moving Averages" if report_language == "en" else "均线"
         volume_analysis_label = "Volume" if report_language == "en" else "量能"
         news_heading = "News Flow" if report_language == "en" else "消息面"
+        if report_date is None:
+            report_date = datetime.now().strftime('%Y-%m-%d')
+
+        if report_language != "en":
+            return self._generate_daily_a_share_observation_report(results, report_date)
+
         if getattr(config, 'report_renderer_enabled', False) and results:
             from src.services.report_renderer import render
             out = render(

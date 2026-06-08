@@ -627,6 +627,15 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
         out = service.generate_dashboard_report([result], report_date="2026-02-01")
 
+        self.assertIn("【每日A股观察】", out)
+        self.assertIn("日期：2026-02-01", out)
+        self.assertIn("一、今日市场结论", out)
+        self.assertIn("二、自选股评级总表", out)
+        self.assertIn("| 股票名称 | 代码 | 结论 | 趋势 | 风险等级 | 明日策略 |", out)
+        self.assertIn("三、重点个股分析", out)
+        self.assertIn("四、明日最值得关注的 5 只股票", out)
+        self.assertIn("五、纪律提醒", out)
+        self.assertIn("- 不追高", out)
         self.assertIn("*分析模型：gemini/gemini-2.5-flash*", out)
 
     @mock.patch("src.notification.get_config")
