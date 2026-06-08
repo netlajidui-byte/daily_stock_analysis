@@ -430,6 +430,80 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
                 config = Config._load_from_env()
 
         self.assertEqual(config.stock_list, ["600519", "000001"])
+        self.assertEqual(config.holding_stock_list, [])
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_watchlist_csv_takes_priority_over_stock_list_env(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watchlist_path = Path(temp_dir) / "watchlist.csv"
+            watchlist_path.write_text(
+                "\n".join(
+                    [
+                        "code,holding",
+                        "300750,1",
+                        "hk00700,0",
+                        "AAPL,0",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("src.config.WATCHLIST_CSV_PATH", watchlist_path), patch.dict(
+                os.environ,
+                {"STOCK_LIST": "600519,000001"},
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertEqual(config.stock_list, ["300750", "HK00700", "AAPL"])
+        self.assertEqual(config.holding_stock_list, ["300750"])
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_watchlist_csv_accepts_code_only_format(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watchlist_path = Path(temp_dir) / "watchlist.csv"
+            watchlist_path.write_text("code\n300750\nhk00700\n", encoding="utf-8")
+
+            with patch("src.config.WATCHLIST_CSV_PATH", watchlist_path), patch.dict(
+                os.environ,
+                {"STOCK_LIST": "600519,000001"},
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertEqual(config.stock_list, ["300750", "HK00700"])
+        self.assertEqual(config.holding_stock_list, [])
+
+    def test_refresh_stock_list_falls_back_to_stock_list_when_watchlist_has_no_enabled_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watchlist_path = Path(temp_dir) / "watchlist.csv"
+            env_path = Path(temp_dir) / ".env"
+            watchlist_path.write_text(
+                "code,name,market,group,note,enabled\n300750,宁德时代,cn,core,,false\n",
+                encoding="utf-8",
+            )
+            env_path.write_text("STOCK_LIST=600519,000001\n", encoding="utf-8")
+
+            config = Config(stock_list=[])
+            with patch("src.config.WATCHLIST_CSV_PATH", watchlist_path), patch.dict(
+                os.environ,
+                {"ENV_FILE": str(env_path)},
+                clear=True,
+            ):
+                config.refresh_stock_list()
+
+        self.assertEqual(config.stock_list, ["600519", "000001"])
 
     def test_refresh_stock_list_preserves_empty_required_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

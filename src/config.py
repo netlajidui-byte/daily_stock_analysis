@@ -10,6 +10,7 @@ A股自选股智能分析系统 - 配置管理模块
 3. 提供类型安全的配置访问接口
 """
 
+import csv
 import json
 import logging
 import os
@@ -38,6 +39,64 @@ from src.notification_contracts import (
 from src.llm import generation_params as llm_generation_params
 
 logger = logging.getLogger(__name__)
+
+WATCHLIST_CSV_PATH = Path(__file__).resolve().parent.parent / "config" / "watchlist.csv"
+
+
+def _parse_stock_list_csv(value: str) -> List[str]:
+    return [
+        (c or "").strip().upper()
+        for c in (value or "").split(",")
+        if (c or "").strip()
+    ]
+
+
+def _load_watchlist_codes(path: Optional[Path] = None) -> Tuple[List[str], List[str]]:
+    """Load stock codes and holding codes from config/watchlist.csv.
+
+    An absent, empty, or unusable file returns empty lists so callers can
+    preserve the historical STOCK_LIST fallback.
+    """
+    watchlist_path = path or WATCHLIST_CSV_PATH
+    if not watchlist_path.exists() or not watchlist_path.is_file():
+        return [], []
+
+    try:
+        with watchlist_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.reader(handle))
+            if not rows:
+                return [], []
+
+            header = [(cell or "").strip().lower() for cell in rows[0]]
+            has_header = "code" in header
+            code_idx = header.index("code") if has_header else 0
+            holding_idx = header.index("holding") if has_header and "holding" in header else None
+            enabled_idx = header.index("enabled") if has_header and "enabled" in header else None
+            data_rows = rows[1:] if has_header else rows
+
+            codes: List[str] = []
+            holding_codes: List[str] = []
+            seen = set()
+            for row in data_rows:
+                if len(row) <= code_idx:
+                    continue
+                code = (row[code_idx] or "").strip().upper()
+                if not code or code in seen:
+                    continue
+                if enabled_idx is not None:
+                    enabled = (row[enabled_idx] if len(row) > enabled_idx else "").strip().lower()
+                    if enabled != "true":
+                        continue
+                codes.append(code)
+                seen.add(code)
+                if holding_idx is not None:
+                    holding = (row[holding_idx] if len(row) > holding_idx else "").strip()
+                    if holding == "1":
+                        holding_codes.append(code)
+            return codes, holding_codes
+    except OSError as exc:
+        logger.warning("读取股票池配置文件失败，回退使用 STOCK_LIST: %s", exc)
+        return [], []
 
 DEFAULT_ALPHASIFT_INSTALL_SPEC = (
     "git+https://github.com/ZhuLinsen/alphasift.git@1a0ed8c99b3615c0cb1076e6029827ffc6de2344"
@@ -619,6 +678,7 @@ class Config:
     
     # === 自选股配置 ===
     stock_list: List[str] = field(default_factory=list)
+    holding_stock_list: List[str] = field(default_factory=list)
 
     # === 飞书云文档配置 ===
     feishu_app_id: Optional[str] = None
@@ -1128,11 +1188,10 @@ class Config:
             default='',
             prefer_env_file=True,
         )
-        stock_list = [
-            (c or "").strip().upper()
-            for c in stock_list_str.split(',')
-            if (c or "").strip()
-        ]
+        watchlist_codes, holding_stock_list = _load_watchlist_codes()
+        stock_list = watchlist_codes or _parse_stock_list_csv(stock_list_str)
+        if not stock_list:
+            holding_stock_list = []
         
         # === LiteLLM multi-key parsing ===
         # GEMINI_API_KEYS (comma-separated) > GEMINI_API_KEY (single)
@@ -1428,6 +1487,7 @@ class Config:
 
         return cls(
             stock_list=stock_list,
+            holding_stock_list=holding_stock_list,
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
             feishu_folder_token=os.getenv('FEISHU_FOLDER_TOKEN'),
@@ -2399,13 +2459,13 @@ class Config:
         if not stock_list_str:
             stock_list_str = os.getenv('STOCK_LIST', '')
 
-        stock_list = [
-            (c or "").strip().upper()
-            for c in stock_list_str.split(',')
-            if (c or "").strip()
-        ]
+        watchlist_codes, holding_stock_list = _load_watchlist_codes()
+        stock_list = watchlist_codes or _parse_stock_list_csv(stock_list_str)
+        if not stock_list:
+            holding_stock_list = []
 
         self.stock_list = stock_list
+        self.holding_stock_list = holding_stock_list
     
     def validate_structured(self) -> List[ConfigIssue]:
         """Return structured validation issues with severity levels.

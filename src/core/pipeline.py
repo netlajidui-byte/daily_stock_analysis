@@ -2354,6 +2354,11 @@ class StockAnalysisPipeline:
             report_type = ReportType.FULL
         else:
             report_type = ReportType.SIMPLE
+        holding_stock_codes = {
+            normalize_stock_code(code)
+            for code in getattr(self.config, "holding_stock_list", []) or []
+            if (code or "").strip()
+        }
         # Issue #128: 从配置读取分析间隔
         analysis_delay = getattr(self.config, 'analysis_delay', 0)
 
@@ -2375,7 +2380,11 @@ class StockAnalysisPipeline:
                     code,
                     skip_analysis=dry_run,
                     single_stock_notify=False,
-                    report_type=report_type,  # Issue #119: 传递报告类型
+                    report_type=(
+                        ReportType.FULL
+                        if normalize_stock_code(code) in holding_stock_codes
+                        else report_type
+                    ),
                     analysis_query_id=uuid.uuid4().hex,
                     current_time=resume_reference_time,
                 ): code

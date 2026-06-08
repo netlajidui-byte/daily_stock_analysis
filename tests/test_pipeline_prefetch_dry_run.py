@@ -17,6 +17,7 @@ from tests.litellm_stub import ensure_litellm_stub
 ensure_litellm_stub()
 
 from src.core.pipeline import StockAnalysisPipeline
+from src.enums import ReportType
 
 
 class TestPipelinePrefetchBehavior(unittest.TestCase):
@@ -30,6 +31,7 @@ class TestPipelinePrefetchBehavior(unittest.TestCase):
         pipeline.process_single_stock = MagicMock(return_value=process_result)
         pipeline.config = SimpleNamespace(
             stock_list=["000001"],
+            holding_stock_list=[],
             refresh_stock_list=lambda: None,
             single_stock_notify=False,
             report_type="simple",
@@ -101,6 +103,23 @@ class TestPipelinePrefetchBehavior(unittest.TestCase):
         self.assertEqual(len({id(value) for value in task_reference_times}), 1)
         self.assertEqual(len({id(value) for value in stats_reference_times}), 1)
         self.assertIs(task_reference_times[0], stats_reference_times[0])
+
+    def test_run_uses_full_report_for_holding_watchlist_codes(self):
+        pipeline = self._build_pipeline(process_result=SimpleNamespace(code="600519"))
+        pipeline.config.holding_stock_list = ["600519"]
+
+        pipeline.run(
+            stock_codes=["600519", "000001"],
+            dry_run=False,
+            send_notification=False,
+        )
+
+        report_types = {
+            call.args[0]: call.kwargs["report_type"]
+            for call in pipeline.process_single_stock.call_args_list
+        }
+        self.assertEqual(report_types["600519"], ReportType.FULL)
+        self.assertEqual(report_types["000001"], ReportType.SIMPLE)
 
 
 if __name__ == "__main__":
